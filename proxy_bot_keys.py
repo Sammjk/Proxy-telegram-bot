@@ -2,18 +2,23 @@ import os
 import sqlite3
 import aiohttp
 from datetime import datetime, timedelta
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 
 # =========================
 # CONFIGURACIÓN
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 7178424080
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # DEBE existir en Render
+ADMIN_ID = 7178424080               # TU ID
 DB_FILE = "bot.db"
 
 MAX_PROXIES = 10
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 15
 
 PROXY_URLS = {
     "http": "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&country={country}",
@@ -58,7 +63,6 @@ def has_access(user_id: int) -> bool:
     c.execute("SELECT expires_at FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     conn.close()
-
     return bool(row and datetime.fromisoformat(row[0]) > datetime.utcnow())
 
 # =========================
@@ -111,7 +115,7 @@ async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Uso: /redeem <KEY>")
+        await update.message.reply_text("Uso: /redeem <key>")
         return
 
     code = context.args[0].upper()
@@ -119,60 +123,68 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+
     c.execute("SELECT days, used FROM keys WHERE code = ?", (code,))
     row = c.fetchone()
 
-    if not row or row[1]:
+    if not row:
+        await update.message.reply_text("❌ Key inválida.")
         conn.close()
-        await update.message.reply_text("❌ Key inválida o usada.")
         return
 
-    expires = datetime.utcnow() + timedelta(days=row[0])
+    days, used = row
+    if used:
+        await update.message.reply_text("❌ Esta key ya fue usada.")
+        conn.close()
+        return
 
-    c.execute("UPDATE keys SET used = 1 WHERE code = ?", (code,))
+    expires = datetime.utcnow() + timedelta(days=days)
+
     c.execute(
         "INSERT OR REPLACE INTO users (user_id, expires_at) VALUES (?, ?)",
         (user_id, expires.isoformat())
     )
-
+    c.execute("UPDATE keys SET used = 1 WHERE code = ?", (code,))
     conn.commit()
     conn.close()
 
     await update.message.reply_text(
-        f"✅ *Acceso activado*\n⏳ Expira: {expires.date()}",
+        f"✅ *Acceso activado*\n⏳ Expira: `{expires}`",
         parse_mode="Markdown"
     )
 
 async def myaccess(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT expires_at FROM users WHERE user_id = ?", (update.effective_user.id,))
+    c.execute("SELECT expires_at FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     conn.close()
 
     if not row:
-        await update.message.reply_text("❌ No tienes acceso activo.")
+        await update.message.reply_text("No tienes acceso activo.")
         return
 
-    await update.message.reply_text(f"⏳ Tu acceso expira el:\n{row[0]}")
+    await update.message.reply_text(
+        f"⏳ Acceso válido hasta:\n`{row[0]}`",
+        parse_mode="Markdown"
+    )
 
-# =========================
-# PROXYS (FINAL)
-# =========================
 async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_access(update.effective_user.id):
-        await update.message.reply_text("🔒 Acceso requerido. Usa /redeem <key>")
+        await update.message.reply_text("❌ No tienes acceso. Usa /redeem.")
         return
 
-    proxy_type = "http"
-    country = "all"
+    if not context.args:
+        await update.message.reply_text("Uso: /proxy <http|socks4|socks5> [PAIS]")
+        return
 
-    if len(context.args) >= 1:
-        if context.args[0].lower() in PROXY_URLS:
-            proxy_type = context.args[0].lower()
-        else:
-            country = context.args[0].upper()
+    proxy_type = context.args[0].lower()
+    if proxy_type not in PROXY_URLS:
+        await update.message.reply_text("Tipo inválido: http | socks4 | socks5")
+        return
 
+    country = "ALL"
     if len(context.args) >= 2:
         country = context.args[1].upper()
 
@@ -182,7 +194,7 @@ async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=REQUEST_TIMEOUT) as r:
                 text = await r.text()
-    except:
+    except Exception:
         await update.message.reply_text("❌ Error obteniendo proxys.")
         return
 
@@ -202,10 +214,10 @@ async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Live Proxy Checker Bot*\n\n"
+        "🚀 *Live Proxy Checker Bot*\n\n"
         "/redeem <key>\n"
         "/myaccess\n"
-        "/proxy [http|socks4|socks5] [PAIS]",
+        "/proxy <http|socks4|socks5> [PAIS]",
         parse_mode="Markdown"
     )
 
@@ -213,7 +225,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =========================
 def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN no está definido en variables de entorno")
+
     init_db()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
