@@ -10,10 +10,11 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# =========================
+# =====================
 # CONFIGURACIÓN
-# =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # DEBE existir en Render
+# =====================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # VARIABLE DE ENTORNO EN RENDER
 ADMIN_ID = 7178424080               # TU ID
 DB_FILE = "bot.db"
 
@@ -26,36 +27,38 @@ PROXY_URLS = {
     "socks5": "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&country={country}",
 }
 
-# =========================
+# =====================
 # BASE DE DATOS
-# =========================
+# =====================
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
     c.execute("""
-    CREATE TABLE IF NOT EXISTS keys (
-        code TEXT PRIMARY KEY,
-        days INTEGER,
-        used INTEGER DEFAULT 0
-    )
+        CREATE TABLE IF NOT EXISTS keys (
+            code TEXT PRIMARY KEY,
+            days INTEGER
+        )
     """)
 
     c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        expires_at TEXT
-    )
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            expires_at TEXT
+        )
     """)
 
     conn.commit()
     conn.close()
 
-# =========================
+# =====================
 # UTILIDADES
-# =========================
+# =====================
+
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
+
 
 def has_access(user_id: int) -> bool:
     conn = sqlite3.connect(DB_FILE)
@@ -63,68 +66,45 @@ def has_access(user_id: int) -> bool:
     c.execute("SELECT expires_at FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return bool(row and datetime.fromisoformat(row[0]) > datetime.utcnow())
 
-# =========================
-# COMANDOS ADMIN
-# =========================
-async def createkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+    if not row:
+        return False
 
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Uso: /createkey <dias>")
-        return
+    return datetime.fromisoformat(row[0]) > datetime.utcnow()
 
-    days = int(context.args[0])
-    code = os.urandom(6).hex().upper()
+# =====================
+# COMANDOS
+# =====================
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO keys (code, days) VALUES (?, ?)", (code, days))
-    conn.commit()
-    conn.close()
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"🔑 *Key creada*\n\n`{code}`\n⏳ {days} días",
+        "🤖 *Live Proxy Checker Bot*\n\n"
+        "/redeem <key>\n"
+        "/myaccess\n"
+        "/proxy <http|socks4|socks5> [PAIS]",
         parse_mode="Markdown"
     )
 
-async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+
+async def myaccess(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not has_access(update.effective_user.id):
+        await update.message.reply_text("❌ No tienes acceso activo.")
         return
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id, expires_at FROM users")
-    rows = c.fetchall()
-    conn.close()
+    await update.message.reply_text("✅ Tienes acceso activo.")
 
-    if not rows:
-        await update.message.reply_text("No hay usuarios activos.")
-        return
 
-    msg = "👥 *Usuarios activos*\n\n"
-    for uid, exp in rows:
-        msg += f"{uid} → {exp}\n"
-
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-# =========================
-# COMANDOS USUARIO
-# =========================
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Uso: /redeem <key>")
         return
 
-    code = context.args[0].upper()
-    user_id = update.effective_user.id
+    code = context.args[0]
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
-    c.execute("SELECT days, used FROM keys WHERE code = ?", (code,))
+    c.execute("SELECT days FROM keys WHERE code = ?", (code,))
     row = c.fetchone()
 
     if not row:
@@ -132,47 +112,23 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         return
 
-    days, used = row
-    if used:
-        await update.message.reply_text("❌ Esta key ya fue usada.")
-        conn.close()
-        return
-
+    days = row[0]
     expires = datetime.utcnow() + timedelta(days=days)
 
     c.execute(
-        "INSERT OR REPLACE INTO users (user_id, expires_at) VALUES (?, ?)",
-        (user_id, expires.isoformat())
+        "REPLACE INTO users (user_id, expires_at) VALUES (?, ?)",
+        (update.effective_user.id, expires.isoformat())
     )
-    c.execute("UPDATE keys SET used = 1 WHERE code = ?", (code,))
+    c.execute("DELETE FROM keys WHERE code = ?", (code,))
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(
-        f"✅ *Acceso activado*\n⏳ Expira: `{expires}`",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"✅ Acceso activado por {days} días.")
 
-async def myaccess(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT expires_at FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-
-    if not row:
-        await update.message.reply_text("No tienes acceso activo.")
-        return
-
-    await update.message.reply_text(
-        f"⏳ Acceso válido hasta:\n`{row[0]}`",
-        parse_mode="Markdown"
-    )
 
 async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_access(update.effective_user.id):
-        await update.message.reply_text("❌ No tienes acceso. Usa /redeem.")
+        await update.message.reply_text("❌ No tienes acceso.")
         return
 
     if not context.args:
@@ -180,13 +136,11 @@ async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     proxy_type = context.args[0].lower()
-    if proxy_type not in PROXY_URLS:
-        await update.message.reply_text("Tipo inválido: http | socks4 | socks5")
-        return
+    country = context.args[1].upper() if len(context.args) > 1 else "ALL"
 
-    country = "ALL"
-    if len(context.args) >= 2:
-        country = context.args[1].upper()
+    if proxy_type not in PROXY_URLS:
+        await update.message.reply_text("❌ Tipo inválido.")
+        return
 
     url = PROXY_URLS[proxy_type].format(country=country)
 
@@ -204,37 +158,22 @@ async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No se encontraron proxys.")
         return
 
-    msg = f"🌍 *Proxys {proxy_type.upper()} ({country})*\n\n"
-    msg += "\n".join(proxies)
-
+    msg = f"🌍 *{proxy_type.upper()}* ({country})\n\n" + "\n".join(proxies)
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-# =========================
-# START
-# =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🚀 *Live Proxy Checker Bot*\n\n"
-        "/redeem <key>\n"
-        "/myaccess\n"
-        "/proxy <http|socks4|socks5> [PAIS]",
-        parse_mode="Markdown"
-    )
-
-# =========================
+# =====================
 # MAIN
-# =========================
+# =====================
+
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN no está definido en variables de entorno")
+        raise RuntimeError("BOT_TOKEN no está definido")
 
     init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("createkey", createkey))
-    app.add_handler(CommandHandler("listusers", listusers))
     app.add_handler(CommandHandler("redeem", redeem))
     app.add_handler(CommandHandler("myaccess", myaccess))
     app.add_handler(CommandHandler("proxy", proxy))
