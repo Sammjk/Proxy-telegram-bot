@@ -1,21 +1,22 @@
 import os
 import sqlite3
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
+    Defaults
 )
 
 # =====================
 # CONFIGURACIÓN
 # =====================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # VARIABLE DE ENTORNO EN RENDER
-ADMIN_ID = 7178424080               # TU ID
+BOT_TOKEN = os.getenv("BOT_TOKEN") 
+ADMIN_ID = 7178424080               
 DB_FILE = "bot.db"
 
 MAX_PROXIES = 10
@@ -34,21 +35,18 @@ PROXY_URLS = {
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS keys (
             code TEXT PRIMARY KEY,
             days INTEGER
         )
     """)
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             expires_at TEXT
         )
     """)
-
     conn.commit()
     conn.close()
 
@@ -59,7 +57,6 @@ def init_db():
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
-
 def has_access(user_id: int) -> bool:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -69,8 +66,10 @@ def has_access(user_id: int) -> bool:
 
     if not row:
         return False
-
-    return datetime.fromisoformat(row[0]) > datetime.utcnow()
+    
+    # Uso de timezone-aware objects para evitar Warnings en v20
+    expiry = datetime.fromisoformat(row[0]).replace(tzinfo=timezone.utc)
+    return expiry > datetime.now(timezone.utc)
 
 # =====================
 # COMANDOS
@@ -78,21 +77,19 @@ def has_access(user_id: int) -> bool:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Live Proxy Checker Bot*\n\n"
-        "/redeem <key>\n"
-        "/myaccess\n"
-        "/proxy <http|socks4|socks5> [PAIS]",
+        "🤖 *Live Proxy Checker Bot (Italy Edition)*\n\n"
+        "Usa los comandos abajo para gestionar tu acceso:\n"
+        "/redeem <key> - Activar suscripción\n"
+        "/myaccess - Ver estado de cuenta\n"
+        "/proxy <tipo> [PAIS] - Obtener proxies",
         parse_mode="Markdown"
     )
-
 
 async def myaccess(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_access(update.effective_user.id):
         await update.message.reply_text("❌ No tienes acceso activo.")
         return
-
     await update.message.reply_text("✅ Tienes acceso activo.")
-
 
 async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -100,10 +97,8 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     code = context.args[0]
-
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-
     c.execute("SELECT days FROM keys WHERE code = ?", (code,))
     row = c.fetchone()
 
@@ -113,7 +108,8 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     days = row[0]
-    expires = datetime.utcnow() + timedelta(days=days)
+    # Calculamos fecha de expiración asíncrona
+    expires = datetime.now(timezone.utc) + timedelta(days=days)
 
     c.execute(
         "REPLACE INTO users (user_id, expires_at) VALUES (?, ?)",
@@ -125,7 +121,6 @@ async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ Acceso activado por {days} días.")
 
-
 async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_access(update.effective_user.id):
         await update.message.reply_text("❌ No tienes acceso.")
@@ -136,7 +131,8 @@ async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     proxy_type = context.args[0].lower()
-    country = context.args[1].upper() if len(context.args) > 1 else "ALL"
+    # Confirmamos Italia (IT) si no se especifica país
+    country = context.args[1].upper() if len(context.args) > 1 else "IT"
 
     if proxy_type not in PROXY_URLS:
         await update.message.reply_text("❌ Tipo inválido.")
@@ -152,13 +148,13 @@ async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error obteniendo proxys.")
         return
 
-    proxies = [p for p in text.splitlines() if ":" in p][:MAX_PROXIES]
+    proxies = [p.strip() for p in text.splitlines() if ":" in p][:MAX_PROXIES]
 
     if not proxies:
-        await update.message.reply_text("❌ No se encontraron proxys.")
+        await update.message.reply_text(f"❌ No se encontraron proxys para {country}.")
         return
 
-    msg = f"🌍 *{proxy_type.upper()}* ({country})\n\n" + "\n".join(proxies)
+    msg = f"🌍 *{proxy_type.upper()}* ({country})\n\n`" + "\n".join(proxies) + "`"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 # =====================
@@ -167,18 +163,24 @@ async def proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN no está definido")
+        print("Error: El BOT_TOKEN no está configurado.")
+        return
 
     init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Configuración de la aplicación v20+
+    defaults = Defaults(parse_mode="Markdown")
+    application = ApplicationBuilder().token(BOT_TOKEN).defaults(defaults).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("redeem", redeem))
-    app.add_handler(CommandHandler("myaccess", myaccess))
-    app.add_handler(CommandHandler("proxy", proxy))
+    # Añadir manejadores
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("redeem", redeem))
+    application.add_handler(CommandHandler("myaccess", myaccess))
+    application.add_handler(CommandHandler("proxy", proxy))
 
-    app.run_polling()
+    print("Bot iniciado con éxito...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
+    
